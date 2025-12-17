@@ -1,0 +1,3 @@
+[submodule "DiscordIPC"]
+	path = DiscordIPC
+	url = https://github.com/MrSnowman/DiscordIPC.git
