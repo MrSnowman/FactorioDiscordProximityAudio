@@ -145,7 +145,8 @@ public sealed class PositionTransferHostService : IService
         }
 
         var packet = new Packet();
-        packet.Create(ms.GetBuffer(), PacketFlags.Reliable);
+        // Use ToArray() to ensure only the written bytes are sent (avoids trailing/unused buffer data).
+        packet.Create(ms.ToArray(), PacketFlags.Reliable);
         Server.Broadcast((byte)ChannelType.Identify, ref packet);
     }
 
@@ -168,7 +169,8 @@ public sealed class PositionTransferHostService : IService
         }
 
         var packet = new Packet();
-        packet.Create(ms.GetBuffer(), PacketFlags.Reliable);
+        // Use ToArray() so we only send the bytes actually written to the stream.
+        packet.Create(ms.ToArray(), PacketFlags.Reliable);
         connection.Send((byte)ChannelType.Identify, ref packet);
     }
 
@@ -185,7 +187,8 @@ public sealed class PositionTransferHostService : IService
         }
 
         var packet = new Packet();
-        packet.Create(ms.GetBuffer());
+        // Use ToArray() to avoid trailing bytes from internal buffer.
+        packet.Create(ms.ToArray());
 
         Server.Broadcast((byte)ChannelType.Position, ref packet, sender);
 

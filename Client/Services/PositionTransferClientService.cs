@@ -103,36 +103,87 @@ public sealed class PositionTransferClientService : IService
             }
         }
     }
+    // This function will handle the logging in a non-destructive way
+    private void LogPacketDetails(ref Event netEvent, Span<byte> buffer)
+    {
+        // Log packet general information
+        Log.Information("Received message in channel {ChannelID}, packet length {PacketLength}.", netEvent.ChannelID, netEvent.Packet.Length);
+
+        // Log the first few bytes of the buffer (up to 32 bytes for preview)
+        int previewLength = Math.Min(32, buffer.Length);
+        string bufferPreview = BitConverter.ToString(buffer.Slice(0, previewLength).ToArray());
+        Log.Information("First {PreviewLength} bytes of packet data: {BufferPreview}", previewLength, bufferPreview);
+
+        // Optionally log the full buffer (be careful with large packets)
+        // Log.Information("Full packet data: {BufferFullData}", BitConverter.ToString(buffer.ToArray()));
+
+        // Log the converted opCode
+        var opCode = (ChannelType)netEvent.ChannelID;
+        Log.Information("ChannelID {ChannelID} converted to opCode: {OpCode}.", netEvent.ChannelID, opCode);
+
+        // Log details of extracted Discord ID (if buffer is long enough)
+        if (buffer.Length >= DiscordUtility.MaxUidLength)
+        {
+            string discordId = Encoding.ASCII.GetString(buffer[..DiscordUtility.MaxUidLength]);
+            Log.Information("Extracted Discord ID from packet: {DiscordId}", discordId);
+        }
+        else
+        {
+            Log.Warning("Buffer is smaller than expected for extracting Discord ID (Length: {BufferLength}).", buffer.Length);
+        }
+    }
 
     private unsafe void OnMessageReceived(ref Event netEvent)
     {
         var buffer = new Span<byte>((byte*)netEvent.Packet.Data, netEvent.Packet.Length);
         var opCode = (ChannelType)netEvent.ChannelID;
-
+        LogPacketDetails(ref netEvent, buffer);
         switch (opCode)
         {
             case ChannelType.Identify:
             {
-                while (buffer.Length > 0)
+                // Expect entries of: uint (4) + fixed-length uid (DiscordUtility.MaxUidLength)
+                var singleEntrySize = sizeof(uint) + DiscordUtility.MaxUidLength;
+                while (buffer.Length >= singleEntrySize)
                 {
                     var clientId = BitConverter.ToUInt32(buffer[..sizeof(uint)]);
                     buffer = buffer[sizeof(uint)..];
+
                     var discordId = DiscordUtility.GetUid(Encoding.ASCII.GetString(buffer[..DiscordUtility.MaxUidLength]));
                     buffer = buffer[DiscordUtility.MaxUidLength..];
 
                     PeerToDiscordId[clientId] = discordId;
                 }
 
+                if (buffer.Length != 0)
+                {
+                    Log.Warning("Received IDENTIFY packet with unexpected leftover length {LeftoverLength}.", buffer.Length);
+                }
+
                 break;
             }
             case ChannelType.Position:
             {
+                // Expect 8 + 8 + 4 + 4 = 24 bytes
+                const int expectedPositionSize = sizeof(double) * 2 + sizeof(int) + sizeof(uint);
+                if (buffer.Length < expectedPositionSize)
+                {
+                    Log.Warning("Received POSITION packet with insufficient length {Length}. Expected at least {Expected}.", buffer.Length, expectedPositionSize);
+                    break;
+                }
+
                 var x       = BitConverter.ToDouble(buffer[..8]);
                 var y       = BitConverter.ToDouble(buffer[8..16]);
                 var surface = BitConverter.ToInt32(buffer[16..20]);
-                var peerId  = BitConverter.ToUInt32(buffer[20..]);
+                var peerId  = BitConverter.ToUInt32(buffer[20..24]);
 
-                AnyClientUpdateReceived?.Invoke(PeerToDiscordId[peerId], new ClientPosition
+                if (!PeerToDiscordId.TryGetValue(peerId, out var discord))
+                {
+                    Log.Warning("Unknown peer id {PeerId} in POSITION packet.", peerId);
+                    break;
+                }
+
+                AnyClientUpdateReceived?.Invoke(discord, new ClientPosition
                 {
                     x            = x,
                     y            = y,
@@ -142,8 +193,20 @@ public sealed class PositionTransferClientService : IService
             }
             case ChannelType.Disconnect:
             {
+                if (buffer.Length < sizeof(uint))
+                {
+                    Log.Warning("Received DISCONNECT packet with insufficient length {Length}.", buffer.Length);
+                    break;
+                }
+
                 var peerId = BitConverter.ToUInt32(buffer);
-                AnyClientDisconnected?.Invoke(PeerToDiscordId[peerId]);
+                if (!PeerToDiscordId.TryGetValue(peerId, out var discord))
+                {
+                    Log.Warning("Unknown peer id {PeerId} in DISCONNECT packet.", peerId);
+                    break;
+                }
+
+                AnyClientDisconnected?.Invoke(discord);
                 break;
             }
         }
@@ -160,7 +223,8 @@ public sealed class PositionTransferClientService : IService
                 binaryWriter.Write(bytes);
 
             var packet = new Packet();
-            packet.Create(ms.GetBuffer());
+            // Use ToArray() so we only send bytes actually written to the MemoryStream.
+            packet.Create(ms.ToArray());
             _server?.Send((byte)ChannelType.Identify, ref packet);
         }
         catch (Exception e)
