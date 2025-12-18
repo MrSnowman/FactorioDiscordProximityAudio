@@ -16,10 +16,10 @@ public sealed class PositionTransferHostService : IService
 
     private Host?                              Server               { get; set; }
     private VolumeUpdaterService?              PlayerTrackerService { get; set; }
-    private ConcurrentDictionary<uint, string> PeerToDiscordId      { get; } = [];
+    private ConcurrentDictionary<uint, string> PeerToDiscordId      { get; } = new();
     private Thread?                            ENetThread           { get; set; }
 
-    private readonly HashSet<Peer> _connectedPeers = [];
+    private readonly HashSet<Peer> _connectedPeers = new();
 
     public Task<bool> StartAsync(IServiceProvider services, CancellationToken cancellationToken)
     {
@@ -155,23 +155,54 @@ public sealed class PositionTransferHostService : IService
         if (Server is not { IsSet: true })
             return;
 
-        using var ms = new MemoryStream(sizeof(uint) + DiscordUtility.MaxUidLength);
-        using (var binaryWriter = new BinaryWriter(ms))
+        // Diagnostics: capture entries being serialized for the new client
+        Log.Information("Preparing initialize payload for new client {DiscordId} (peer {PeerId}). Known peers: {KnownCount}",
+                        discordId, connection.ID, PeerToDiscordId.Count);
+
+        var entriesIncluded = 0;
+
+        var ms = new MemoryStream(sizeof(uint) + DiscordUtility.MaxUidLength);
+        // Keep the MemoryStream open when the BinaryWriter is disposed so we can read ms.Length / ms.ToArray() afterwards.
+        using (var binaryWriter = new BinaryWriter(ms, Encoding.ASCII, leaveOpen: true))
         {
             foreach (var client in PeerToDiscordId)
             {
-                if (client.Value == discordId)
-                    continue;
+                // This simplifies local testing
+                // It's probably unecessary to map your own clientId to your own discord ID
+                // becuase you're not going to recieve packages from yourself.
+                // small cost for convenience.
+                //if (client.Value == discordId)
+                //   continue;
+
+                // Log every entry that will be included
+                Log.Information(" - Including peer {PeerId} -> {PeerDiscordId}", client.Key, client.Value);
 
                 binaryWriter.Write(client.Key);
                 binaryWriter.Write(Encoding.ASCII.GetBytes(DiscordUtility.GetFixedLengthUid(client.Value)));
+                entriesIncluded++;
             }
         }
+
+        if (entriesIncluded == 0)
+        {
+            Log.Information("No existing peers to send to new client {PeerId} ({DiscordId}).", connection.ID, discordId);
+            // Still send an empty reliable identify packet so client gets a consistent message (optional)
+            var emptyPacket = new Packet();
+            emptyPacket.Create(Array.Empty<byte>(), PacketFlags.Reliable);
+            connection.Send((byte)ChannelType.Identify, ref emptyPacket);
+            return;
+        }
+
+        // Log the final packet size before sending
+        Log.Information("Sending initialize IDENTIFY packet to peer {PeerId}: entries={Entries}, packetLength={Length} bytes",
+                        connection.ID, entriesIncluded, ms.Length);
 
         var packet = new Packet();
         // Use ToArray() so we only send the bytes actually written to the stream.
         packet.Create(ms.ToArray(), PacketFlags.Reliable);
+        ms.Dispose();
         connection.Send((byte)ChannelType.Identify, ref packet);
+        
     }
 
     public void BroadcastPositionPacket(Span<byte> data, Peer sender)
