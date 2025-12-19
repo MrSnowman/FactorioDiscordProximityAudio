@@ -239,6 +239,9 @@ public sealed partial class Main : Form
 
     private void OnIPTextChanged(object sender, EventArgs e)
     {
+        if (ipTextbox.Text.Length < 1)
+            return;
+        
         if (ipTextbox.Text[^1] != ':')
             return;
 
